@@ -1,0 +1,74 @@
+import json
+from tqdm import tqdm
+import argparse
+import requests
+import hashlib
+import tarfile
+import os
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+URL = "https://s3.unistra.fr/camma_public/datasets/cholec80/cholec80.zip"
+CHUNK_SIZE = 2 ** 20
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--data_rootdir")
+parser.add_argument("--verify_checksum", action="store_true")
+parser.add_argument("--keep_archive", action="store_true")
+args = parser.parse_args()
+
+outfile = os.path.join(args.data_rootdir, "cholec80.zip")
+outdir = os.path.join(args.data_rootdir, "cholec80")
+
+def download_file(url, outfile):
+    session = requests.Session()
+    retries = Retry(total=15, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+
+    print("Downloading archive to {}".format(outfile))
+    with session.get(url, stream=True) as r:
+        r.raise_for_status()
+        total_length = int(float(r.headers.get("content-length", 0)) / 10 ** 6)
+        progress_bar = tqdm(unit="MB", total=total_length)
+        with open(outfile, "wb") as f:
+            for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
+                progress_bar.update(len(chunk) / 10 ** 6)
+                f.write(chunk)
+        progress_bar.close()
+
+download_file(URL, outfile)
+
+if args.verify_checksum:
+    print("Verifying checksum")
+    m = hashlib.md5()
+    with open(outfile, 'rb') as f:
+        while True:
+            data = f.read(CHUNK_SIZE)
+            if not data:
+                break
+            m.update(data)
+    chk = m.hexdigest()
+    with open("checksum.txt") as f:
+        true_chk = f.read().strip()
+    print("Checksum: {}".format(chk))
+    assert chk == true_chk, "Checksum does not match!"
+
+print("Extracting files to {}".format(outdir))
+with tarfile.open(outfile, "r") as t:
+    t.extractall(outdir)
+
+if not args.keep_archive:
+    os.remove(outfile)
+
+with open("tf_cholec80/configs/config.json", "r") as f:
+    config = json.loads(f.read())
+
+config["cholec80_dir"] = outdir
+json_string = json.dumps(config, indent=2, sort_keys=True)
+
+with open("tf_cholec80/configs/config.json", "w") as f:
+    f.write(json_string)
+
+print("All done - config saved to {}".format(
+    os.path.join(os.getcwd(), "tf_cholec80/configs/config.json"))
+)
